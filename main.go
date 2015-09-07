@@ -46,9 +46,15 @@ func NewBucket(bucketUrl string, region string) (*Bucket, error) {
 
 	client := s3.New(aws.NewConfig().WithRegion(region))
 
+	prefix := u.Path[1:]
+
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+
 	return &Bucket{
 		Name:   u.Host,
-		Prefix: u.Path[1:],
+		Prefix: prefix,
 		Client: client,
 	}, nil
 }
@@ -63,7 +69,7 @@ func listBucket(bucket *Bucket, out chan string) error {
 
 	callback := func(result *s3.ListObjectsOutput, lastPage bool) bool {
 		for _, obj := range result.Contents {
-			out <- *obj.Key
+			out <- (*obj.Key)[len(bucket.Prefix):]
 		}
 
 		return true
@@ -110,27 +116,15 @@ func copyKeys(sourceBucket, destBucket *Bucket, keys <-chan string) error {
 	return err
 }
 
-func getDestinationKey(sourceBucket, destBucket *Bucket, key string) string {
-	// If we mirror s3://a/prefixA/ to s3://b/prefixB, we want the key
-	// s3://a/prefixA/key to be copied to s3://b/prefixB/key
-	key = key[len(sourceBucket.Prefix):]
-
-	// Avoid double / in keys
-	if strings.HasSuffix(destBucket.Prefix, "/") && strings.HasPrefix(key, "/") {
-		key = key[1:]
-	}
-
-	return destBucket.Prefix + key
-}
-
 func copyKey(sourceBucket, destBucket *Bucket, key string) error {
+	sourceKey := sourceBucket.Prefix + key
 	req := s3.CopyObjectInput{
 		Bucket:     aws.String(destBucket.Name),
-		CopySource: aws.String(sourceBucket.Name + "/" + key),
-		Key:        aws.String(getDestinationKey(sourceBucket, destBucket, key)),
+		CopySource: aws.String(sourceBucket.Name + "/" + sourceKey),
+		Key:        aws.String(destBucket.Prefix + key),
 	}
 
-	log.Printf("%s → %s", key, *req.Key)
+	log.Printf("%s → %s", sourceKey, *req.Key)
 
 	if *dryRun {
 		return nil
@@ -145,28 +139,185 @@ func copyKey(sourceBucket, destBucket *Bucket, key string) error {
 	return nil
 }
 
-var sourceRegion = flag.String("sourceRegion", "", "Region of the source S3 bucket (auto detected if not specified)")
-var destRegion = flag.String("destRegion", "", "Region of the destination S3 bucket (auto detected if not specified)")
-var dryRun = flag.Bool("dryRun", false, "Don't actually do the copy")
+func deleteKeys(bucket *Bucket, keys <-chan string) error {
+	buffer := make([]string, 0, 100)
 
-func runCopy(sourceBucket, destBucket *Bucket) error {
-	sourceKeys := make(chan string)
-	listKeysError := make(chan error, 1)
+	doDelete := func() error {
+		objects := make([]*s3.ObjectIdentifier, len(buffer))
 
-	go func() {
-		listKeysError <- listBucket(sourceBucket, sourceKeys)
-	}()
+		for i, v := range buffer {
+			objects[i] = &s3.ObjectIdentifier{
+				Key: aws.String(bucket.Prefix + v),
+			}
+		}
 
-	if err := copyKeys(sourceBucket, destBucket, sourceKeys); err != nil {
-		return fmt.Errorf("Error while copying data: %s", err)
+		req := s3.DeleteObjectsInput{
+			Bucket: &bucket.Name,
+			Delete: &s3.Delete{
+				Objects: objects,
+			},
+		}
+
+		if _, err := bucket.Client.DeleteObjects(&req); err != nil {
+			return err
+		}
+
+		return nil
 	}
 
-	if err := <-listKeysError; err != nil {
-		return fmt.Errorf("Error while listing keys in source bucket: %s", err)
+	for key := range keys {
+		buffer = append(buffer, key)
+
+		if len(buffer) == cap(buffer) {
+			if err := doDelete(); err != nil {
+				return err
+			}
+		}
+	}
+
+	if len(buffer) > 0 {
+		if err := doDelete(); err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
+
+func compareKeys(sourceKeys, destKeys <-chan string, toCopy, toDelete chan<- string) {
+	sourceFinished := false
+	destFinished := false
+
+	var sourceCurrent *string
+	var destCurrent *string
+
+	buffer := func(from <-chan string, to **string, finished *bool) {
+		if *finished || *to != nil {
+			return
+		}
+
+		key, ok := <-from
+
+		*finished = !ok
+
+		if ok {
+			*to = &key
+		}
+	}
+
+	cmp := func(a, b *string) int {
+		if a == nil && b == nil {
+			return 0
+		}
+
+		if a == nil {
+			return 1
+		}
+
+		if b == nil {
+			return -1
+		}
+
+		if *a == *b {
+			return 0
+		}
+
+		if *a > *b {
+			return 1
+		}
+
+		return -1
+	}
+
+	for {
+		buffer(sourceKeys, &sourceCurrent, &sourceFinished)
+		buffer(destKeys, &destCurrent, &destFinished)
+
+		if sourceFinished && destFinished {
+			close(toCopy)
+			close(toDelete)
+			return
+		}
+
+		switch cmp(sourceCurrent, destCurrent) {
+		case -1:
+			toCopy <- *sourceCurrent
+			sourceCurrent = nil
+		case 0:
+			sourceCurrent = nil
+			destCurrent = nil
+		case 1:
+			toDelete <- *destCurrent
+			destCurrent = nil
+		}
+	}
+}
+
+func runCopy(sourceBucket, destBucket *Bucket) error {
+	sourceKeys := make(chan string)
+	destKeys := make(chan string)
+	keysToCopy := make(chan string)
+	keysToDelete := make(chan string)
+	listSourceKeysError := make(chan error, 1)
+	listDestKeysError := make(chan error, 1)
+	copyError := make(chan error, 1)
+	deleteError := make(chan error, 1)
+
+	go func() {
+		listSourceKeysError <- listBucket(sourceBucket, sourceKeys)
+	}()
+
+	go func() {
+		listDestKeysError <- listBucket(destBucket, destKeys)
+	}()
+
+	go func() {
+		copyError <- copyKeys(sourceBucket, destBucket, keysToCopy)
+	}()
+
+	go func() {
+		deleteError <- deleteKeys(destBucket, keysToDelete)
+	}()
+
+	compareKeys(sourceKeys, destKeys, keysToCopy, keysToDelete)
+
+	for {
+		if listSourceKeysError == nil && listDestKeysError == nil && copyError == nil && deleteError == nil {
+			return nil
+		}
+
+		select {
+		case err := <-listSourceKeysError:
+			if err != nil {
+				return fmt.Errorf("Error while listing keys in source bucket: %s", err)
+			}
+
+			listSourceKeysError = nil
+		case err := <-listDestKeysError:
+			if err != nil {
+				return fmt.Errorf("Error while listing keys in destination bucket: %s", err)
+			}
+
+			listDestKeysError = nil
+		case err := <-copyError:
+			if err != nil {
+				return fmt.Errorf("Error while copying keys to destination bucket: %s", err)
+			}
+
+			copyError = nil
+		case err := <-deleteError:
+			if err != nil {
+				return fmt.Errorf("Error while deleting keys from destination bucket: %s", err)
+			}
+
+			deleteError = nil
+		}
+	}
+}
+
+var sourceRegion = flag.String("sourceRegion", "", "Region of the source S3 bucket (auto detected if not specified)")
+var destRegion = flag.String("destRegion", "", "Region of the destination S3 bucket (auto detected if not specified)")
+var dryRun = flag.Bool("dryRun", false, "Don't actually do the copy")
 
 func main() {
 	flag.Usage = func() {

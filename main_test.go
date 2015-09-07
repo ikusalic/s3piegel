@@ -8,6 +8,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -186,6 +187,47 @@ func testCopySourceToEmpty(t *testing.T, srcBucket, dstBucket *Bucket) {
 	ensureKeys(t, dstBucket, expectedKeys...)
 }
 
+func TestCopyUpdate(t *testing.T) {
+	runTest(t, testCopyUpdate)
+}
+
+func testCopyUpdate(t *testing.T, srcBucket, dstBucket *Bucket) {
+	keys := []keyMeta{
+		{"prefix/a", map[string]string{"Content-Type": "application/json"}},
+		{"prefix/b", nil},
+		{"prefix/c", nil},
+	}
+	existingKeys := []keyMeta{
+		{"prefix/b", nil},
+		{"prefix/d", nil},
+		{"other/z", nil},
+	}
+	createKeys(t, srcBucket, keys...)
+	createKeys(t, dstBucket, existingKeys...)
+	srcBucket.Prefix = "prefix"
+	dstBucket.Prefix = "dst"
+	doCopy(t, srcBucket, dstBucket)
+
+	expectedKeys := []keyMeta{
+		{"dst/a", map[string]string{"Content-Type": "application/json"}},
+		{"dst/b", nil},
+		{"dst/c", nil},
+	}
+	ensureKeys(t, dstBucket, expectedKeys...)
+
+	// Check that nothing was touched outside the prefix
+	req := s3.HeadObjectInput{
+		Bucket: aws.String(dstBucket.Name),
+		Key:    aws.String("other/z"),
+	}
+
+	_, err := dstBucket.Client.HeadObject(&req)
+
+	if err != nil {
+		t.Fatalf("Error while doing HEAD request")
+	}
+}
+
 func TestCoalesceDoubleSlash(t *testing.T) {
 	runTest(t, testCoalesceDoubleSlash)
 }
@@ -203,4 +245,103 @@ func testCoalesceDoubleSlash(t *testing.T, srcBucket, dstBucket *Bucket) {
 		{"dst/a", nil},
 	}
 	ensureKeys(t, dstBucket, expectedKeys...)
+}
+
+func TestCompareKeys(t *testing.T) {
+	testData := []struct {
+		Name       string
+		SourceKeys []string
+		DestKeys   []string
+		ToCopy     []string
+		ToDelete   []string
+	}{
+		{
+			"Empty destination",
+			[]string{"a", "b", "c"},
+			[]string{},
+			[]string{"a", "b", "c"},
+			[]string{},
+		},
+		{
+			"Empty source",
+			[]string{},
+			[]string{"a", "b", "c"},
+			[]string{},
+			[]string{"a", "b", "c"},
+		},
+		{
+			"Same in source and destination",
+			[]string{"a", "b", "c"},
+			[]string{"a", "b", "c"},
+			[]string{},
+			[]string{},
+		},
+		{
+			"Some existing files in destination",
+			[]string{"a", "b", "c"},
+			[]string{"a", "b"},
+			[]string{"c"},
+			[]string{},
+		},
+		{
+			"Some files removed in source",
+			[]string{"a", "c"},
+			[]string{"a", "b", "c"},
+			[]string{},
+			[]string{"b"},
+		},
+		{
+			"Files added and removed",
+			[]string{"a", "b", "c"},
+			[]string{"a", "c", "d"},
+			[]string{"b"},
+			[]string{"d"},
+		},
+	}
+
+	send := func(data []string) <-chan string {
+		ch := make(chan string)
+
+		go func() {
+			for _, d := range data {
+				ch <- d
+			}
+
+			close(ch)
+		}()
+
+		return ch
+	}
+
+	receive := func(out chan<- []string) chan<- string {
+		ch := make(chan string)
+
+		go func() {
+			all := []string{}
+
+			for s := range ch {
+				all = append(all, s)
+			}
+
+			out <- all
+			close(out)
+		}()
+
+		return ch
+	}
+
+	for _, d := range testData {
+		toCopy := make(chan []string, 1)
+		toDelete := make(chan []string, 1)
+
+		compareKeys(send(d.SourceKeys), send(d.DestKeys), receive(toCopy), receive(toDelete))
+
+		if keys := <-toCopy; !reflect.DeepEqual(d.ToCopy, keys) {
+			t.Errorf("Keys to copy don't match for test case %s: expected %s, got %s", d.Name, strings.Join(d.ToCopy, ", "), strings.Join(keys, ", "))
+		}
+
+		if keys := <-toDelete; !reflect.DeepEqual(d.ToDelete, keys) {
+			t.Errorf("Keys to delete don't match for test case %s: expected %s, got %s", d.Name, strings.Join(d.ToDelete, ", "), strings.Join(keys, ", "))
+		}
+	}
 }
