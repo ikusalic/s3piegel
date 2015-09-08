@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.org/abustany/s3piegel.svg)](https://travis-ci.org/abustany/s3piegel)
+
 # S3piegel
 
 S3piegel is a tool to mirror two AWS S3 folders. It's a bit like running
