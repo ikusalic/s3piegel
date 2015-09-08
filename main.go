@@ -251,15 +251,15 @@ func compareKeys(sourceKeys, destKeys <-chan string, toCopy, toDelete chan<- str
 
 		action := cmp(sourceCurrent, destCurrent)
 
-		if action == Skip && *overwrite {
-			action = Copy
-		}
-
 		switch action {
 		case Copy:
 			toCopy <- *sourceCurrent
 			sourceCurrent = nil
 		case Skip:
+			if *overwrite {
+				toCopy <- *sourceCurrent
+			}
+
 			sourceCurrent = nil
 			destCurrent = nil
 		case Delete:
