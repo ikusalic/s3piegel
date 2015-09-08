@@ -41,7 +41,11 @@ func NewBucket(bucketUrl string, region string) (*Bucket, error) {
 			return nil, fmt.Errorf("Error while retrieving bucket location: %s", err)
 		}
 
-		region = *res.LocationConstraint
+		if res.LocationConstraint != nil {
+			region = *res.LocationConstraint
+		} else {
+			region = "us-east-1"
+		}
 	}
 
 	client := s3.New(aws.NewConfig().WithRegion(region))
