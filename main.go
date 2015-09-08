@@ -134,7 +134,7 @@ func copyKey(sourceBucket, destBucket *Bucket, key string) error {
 		}
 	}
 
-	log.Printf("%s → %s", sourceKey, *req.Key)
+	log.Printf("COPY   %s", key)
 
 	return nil
 }
@@ -167,6 +167,8 @@ func deleteKeys(bucket *Bucket, keys <-chan string) error {
 
 	for key := range keys {
 		buffer = append(buffer, key)
+
+		log.Printf("DELETE %s", key)
 
 		if len(buffer) == cap(buffer) {
 			if err := doDelete(); err != nil {
@@ -258,6 +260,8 @@ func compareKeys(sourceKeys, destKeys <-chan string, toCopy, toDelete chan<- str
 		case Skip:
 			if *overwrite {
 				toCopy <- *sourceCurrent
+			} else {
+				log.Printf("SKIP   %s", *sourceCurrent)
 			}
 
 			sourceCurrent = nil
