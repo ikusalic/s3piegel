@@ -172,6 +172,8 @@ func deleteKeys(bucket *Bucket, keys <-chan string) error {
 			if err := doDelete(); err != nil {
 				return err
 			}
+
+			buffer = buffer[0:0]
 		}
 	}
 
