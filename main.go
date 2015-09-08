@@ -124,17 +124,13 @@ func copyKey(sourceBucket, destBucket *Bucket, key string) error {
 		Key:        aws.String(destBucket.Prefix + key),
 	}
 
+	if !*dryRun {
+		if _, err := destBucket.Client.CopyObject(&req); err != nil {
+			return err
+		}
+	}
+
 	log.Printf("%s → %s", sourceKey, *req.Key)
-
-	if *dryRun {
-		return nil
-	}
-
-	_, err := destBucket.Client.CopyObject(&req)
-
-	if err != nil {
-		return err
-	}
 
 	return nil
 }
