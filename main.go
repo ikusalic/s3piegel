@@ -205,28 +205,36 @@ func compareKeys(sourceKeys, destKeys <-chan string, toCopy, toDelete chan<- str
 		}
 	}
 
-	cmp := func(a, b *string) int {
+	type Action int
+
+	const (
+		Copy Action = iota
+		Skip
+		Delete
+	)
+
+	cmp := func(a, b *string) Action {
 		if a == nil && b == nil {
-			return 0
+			return Skip
 		}
 
 		if a == nil {
-			return 1
+			return Delete
 		}
 
 		if b == nil {
-			return -1
+			return Copy
 		}
 
 		if *a == *b {
-			return 0
+			return Skip
 		}
 
 		if *a > *b {
-			return 1
+			return Delete
 		}
 
-		return -1
+		return Copy
 	}
 
 	for {
@@ -239,14 +247,20 @@ func compareKeys(sourceKeys, destKeys <-chan string, toCopy, toDelete chan<- str
 			return
 		}
 
-		switch cmp(sourceCurrent, destCurrent) {
-		case -1:
+		action := cmp(sourceCurrent, destCurrent)
+
+		if action == Skip && *overwrite {
+			action = Copy
+		}
+
+		switch action {
+		case Copy:
 			toCopy <- *sourceCurrent
 			sourceCurrent = nil
-		case 0:
+		case Skip:
 			sourceCurrent = nil
 			destCurrent = nil
-		case 1:
+		case Delete:
 			toDelete <- *destCurrent
 			destCurrent = nil
 		}
@@ -318,6 +332,7 @@ func runCopy(sourceBucket, destBucket *Bucket) error {
 var sourceRegion = flag.String("sourceRegion", "", "Region of the source S3 bucket (auto detected if not specified)")
 var destRegion = flag.String("destRegion", "", "Region of the destination S3 bucket (auto detected if not specified)")
 var dryRun = flag.Bool("dryRun", false, "Don't actually do the copy")
+var overwrite = flag.Bool("overwrite", false, "Force copy even if destination key already exists")
 
 func main() {
 	flag.Usage = func() {
