@@ -7,10 +7,12 @@ import (
 	"github.com/aws/aws-sdk-go/aws/defaults"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Bucket struct {
@@ -83,7 +85,7 @@ func listBucket(bucket *Bucket, out chan string) error {
 }
 
 func copyKeys(sourceBucket, destBucket *Bucket, keys <-chan string) error {
-	const concurrency = 50
+	const concurrency = 100
 	copyErrors := make(chan error, concurrency)
 	wg := sync.WaitGroup{}
 
@@ -274,10 +276,12 @@ func compareKeys(sourceKeys, destKeys <-chan string, toCopy, toDelete chan<- str
 }
 
 func runCopy(sourceBucket, destBucket *Bucket) error {
-	sourceKeys := make(chan string)
-	destKeys := make(chan string)
-	keysToCopy := make(chan string)
-	keysToDelete := make(chan string)
+	const keyChannelBufferSize = 1024
+
+	sourceKeys := make(chan string, keyChannelBufferSize)
+	destKeys := make(chan string, keyChannelBufferSize)
+	keysToCopy := make(chan string, keyChannelBufferSize)
+	keysToDelete := make(chan string, keyChannelBufferSize)
 	listSourceKeysError := make(chan error, 1)
 	listDestKeysError := make(chan error, 1)
 	copyError := make(chan error, 1)
@@ -366,6 +370,8 @@ Additional command line options:
 	// We only use the default client to fetch bucket location.
 	defaults.DefaultConfig.Region = aws.String("us-east-1")
 	defaults.DefaultConfig.S3ForcePathStyle = aws.Bool(true)
+	defaults.DefaultConfig.MaxRetries = aws.Int(10)
+	http.DefaultClient.Timeout = 3 * time.Minute
 
 	sourceUrl := flag.Arg(0)
 	destUrl := flag.Arg(1)
