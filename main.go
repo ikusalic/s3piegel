@@ -371,7 +371,7 @@ Additional command line options:
 	defaults.DefaultConfig.Region = aws.String("us-east-1")
 	defaults.DefaultConfig.S3ForcePathStyle = aws.Bool(true)
 	defaults.DefaultConfig.MaxRetries = aws.Int(10)
-	http.DefaultClient.Timeout = 3 * time.Minute
+	http.DefaultClient.Timeout = 10 * time.Minute
 
 	sourceUrl := flag.Arg(0)
 	destUrl := flag.Arg(1)
